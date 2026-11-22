@@ -70,6 +70,77 @@ c(z) = D f (S - z) / (z (S - f)),    D = f / N
 超出量）、前景足迹内穿透误差、相对参考与两方法间的 RMSE，并附带一个故意朴素的
 “逐像素半径模糊”基线用于对照。
 
+## 遮挡重影诊断（边界追踪 + 内核证据链）
+
+遮挡边缘出现重复轮廓时，诊断必须证明原因，而不是靠裁掉边界“改善”指标。
+`diagnostics.py` 提供以下实现，全部由**真实求解循环**产出（`trace.py` 在
+`scatter` / `gather` 内部记录，绝不另行重写一份会漂移的模拟）：
+
+- **景深边界追踪** `track_dof_boundaries`：逐像素找出远近深度不连续处，记录
+  有符号 CoC、所在半径层与前后景分层。遇到非有限/非正深度**直接报错**，绝不
+  用默认值掩盖（`defaults_used=False`）；始终统计 `included_full_frame=True`
+  的全幅指标。
+- **分层碎裂检测** `layer_fragmentation` / `depth_continuous_components`：
+  用并查集把 `|Δdepth| ≤ step` 的相邻像素归为同一物理表面，再检查该表面是否
+  被量化拆进多个半径层。这正是“同一表面被当成互相遮挡的两层 → 接缝覆盖率
+  空洞 → 背景外漏成重复轮廓”的根因。
+- **有效样本来源**（provenance）：background / foreground / edge /
+  unknown_fill / unrecoverable，随深度与颜色一起进入内核追踪。
+- **重影像素反指近远层贡献** `attribute_pixels`：把每个追踪像素的每一次层贡献
+  （覆盖率、权重、能量、该层前后景符号与来源）展开，可逐项复算出输出像素。
+- **阶段定位** `localize_stage`：把异常归到最早的违约阶段
+  （input → prepare → quantize → layer_assign → convolve → composite → output）。
+- **重影宽度与样本归属** `measure_ghost`：在全幅上测量重复轮廓宽度、峰值与
+  RMSE，并**单独**报告边界带指标；`cropped=False`，带宽指标是子集而非替代。
+- **已知深度阶跃实验** `known_depth_step_probe`：构造平坦阶跃、后退侧面、
+  深度噪声三种已知情形，并**调换深度相同两层的输入序**（`layer_override` +
+  `layer_order`）——顺序不变（`order_swap.invariant=True`）即排除“归一/合成
+  顺序”错误；再用 `side_face` 的 scatter 回弹显著大于 gather 把原因锁定到分层
+  碎裂，而非深度噪声或核覆盖。
+- **日志成本受控**：追踪像素数、每像素事件数、总事件数都有上限，命中即累加
+  `dropped_events` 并置 `truncated`；“停止记录”与“本来就没有”不会被混淆。
+
+### 复核结论（可复现证据）
+
+在 256 px 验证场景上，细板可见侧面沿深度从约 0.700 m 退到约 0.743 m，聚焦
+处的 CoC 对深度敏感，使**同一物理表面**跨进不同半径层。over 合成在接缝处
+留下覆盖率空洞，背景从外侧透出，形成宽约 2 px、峰值约 +0.024/+0.039 的重复
+亮轮廓（对照薄透镜参考）。诊断与已知阶跃实验一致给出：
+
+```
+cause = layer_fragmentation     stage = layer_assign
+composite 阶段同时记录覆盖率空洞   （直接症状，而非根因）
+order_swap.invariant = True     （排除归一 / 合成顺序）
+depth_noise 实验不改判            （排除深度噪声）
+```
+
+运行 `scripts/run_validation.py` 会把完整证据链与 `evidence_digest` 写入
+`metrics.json`；同一输入重跑，摘要**逐字节一致**（`后期景深复跑证据保持一致`）。
+
+## 交互界面（与合成画布联动）
+
+界面由后期景深内核直接驱动：拖动焦点/光圈即在原始测量上重跑求解器，诊断面板
+同步刷新。除了合成图与各类掩码，还提供 **occlusion diagnosis** 视图：在合成
+画布上把分层碎裂足迹按原因着色、框出被追踪的重影像素；右侧面板显示每层散焦
+（半径/代表深度/前后景符号/样本来源）以及逐像素的样本归属表。
+
+启动方式（任选其一）：
+
+```bash
+python3 -m dof_synth.app      # 程序化验证场景，推荐
+python3 scripts/run_ui.py     # 等价入口
+```
+
+- 拖动 **focus (m)** 滑块，或在合成图上点击把焦平面吸附到该像素深度；
+- 调整 **f-number** 观察分层散焦与遮挡边缘如何变化；
+- **scatter / gather** 切换两种求解方法；
+- 在掩码列表选 **occlusion diagnosis**，再点 **Diagnose occlusion**：界面用
+  `track_dof_boundaries` 挑出最强内部遮挡边缘，调用带 `TraceRequest` 的真实
+  求解，然后经 `diagnose_occlusion` 显示 cause/stage、重影宽度与样本归属；
+  若没有可用边缘或追踪缺失，界面**显式报错**（“No occlusion edge”/“Diagnosis
+  failed”），绝不填入默认结论；
+- **Save output + masks** 保存当前 16-bit PNG 与掩码 npz。
+
 ## 运行
 
 依赖安装（无 root 时用用户态 pip）：
@@ -85,7 +156,8 @@ MPLBACKEND=Agg python3 scripts/run_validation.py --size 256 --lens-samples 128 -
 ```
 
 交互界面（拖动焦平面滑块、或在图像上点击把焦平面吸附到该像素深度；切换光圈、
-两种方法与各类掩码；保存输出）：
+两种方法与各类掩码；联动的遮挡诊断面板；保存输出）——详见上文“交互界面”一节，
+启动命令为：
 
 ```bash
 python3 -m dof_synth.app   # 或 scripts/run_ui.py

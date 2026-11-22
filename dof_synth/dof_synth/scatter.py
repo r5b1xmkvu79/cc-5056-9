@@ -25,6 +25,7 @@ import numpy as np
 from .camera import CameraParams
 from .common import DoFMasks, DoFResult, prepare_inputs
 from .kernels import convolve_disk, quantize_radii
+from .trace import TraceRecorder, TraceRequest
 
 
 def render_scatter(
@@ -38,6 +39,9 @@ def render_scatter(
     coc_limit_px: float = 1.0,
     depth_step_m: float = 0.15,
     edge_half_width_px: int = 1,
+    trace: TraceRequest | None = None,
+    layer_order: str = "depth",
+    layer_override: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> DoFResult:
     filled_color, filled_depth, masks, declaration = prepare_inputs(
         color,
@@ -54,7 +58,14 @@ def render_scatter(
     r_cap = float(radius.max()) if max_radius_px is None else max_radius_px
     r_cap = max(r_cap, 1e-3)
 
-    layer_idx, layer_radius = quantize_radii(radius, n_layers, r_cap)
+    if layer_override is not None:
+        # Diagnostic seam: callers cannot otherwise force a chosen layer
+        # partition, and the whole point of the equal-depth order test is
+        # to put two co-planar regions in two layers of equal radius.
+        layer_idx, layer_radius = layer_override
+        n_layers = int(np.asarray(layer_radius).size)
+    else:
+        layer_idx, layer_radius = quantize_radii(radius, n_layers, r_cap)
 
     acc_color = np.zeros((h, w, 3), dtype=np.float64)
     acc_alpha = np.zeros((h, w), dtype=np.float64)
@@ -69,7 +80,30 @@ def render_scatter(
         if sel.any():
             layer_min_depth[k] = filled_depth[sel].min()
 
-    for k in np.argsort(layer_min_depth):
+    if layer_order not in ("depth", "reverse"):
+        raise ValueError("layer_order must be 'depth' or 'reverse'")
+    visit = np.argsort(layer_min_depth)
+    if layer_order == "reverse":
+        # Diagnostic only: visiting far-to-near in a front-to-back
+        # over-composite is physically wrong, so the caller can measure
+        # how much the result depends on compositing order alone.
+        visit = visit[::-1]
+
+    recorder = None
+    if trace is not None:
+        recorder = TraceRecorder(
+            trace,
+            provenance=masks.provenance,
+            signed_coc_px=masks.signed_coc_px,
+            depth_m=filled_depth,
+            layer_index=layer_idx,
+            layer_radius=layer_radius,
+            layer_min_depth=layer_min_depth,
+            method="forward_scatter",
+            n_layers=n_layers,
+        )
+
+    for order_rank, k in enumerate(visit):
         if not np.isfinite(layer_min_depth[k]):
             continue
         sel = layer_idx == k
@@ -77,6 +111,9 @@ def render_scatter(
         coverage = sel.astype(np.float64)
         premult = np.zeros((h, w, 3), dtype=np.float64)
         premult[sel] = filled_color[sel]
+
+        if recorder is not None:
+            recorder.begin_layer(k, r, order_rank, sel)
 
         if r > 1e-3:
             coverage = convolve_disk(coverage, r)
@@ -87,6 +124,11 @@ def render_scatter(
         # destroy the energy the lens spreads into neighbouring pixels.
         alpha = np.clip(coverage, 0.0, 1.0)
         weight = 1.0 - acc_alpha
+        if recorder is not None:
+            recorder.note(
+                k, r, order_rank, alpha, weight, acc_alpha,
+                premult * weight[..., None],
+            )
         acc_color += premult * weight[..., None]
         acc_alpha += alpha * weight
 
@@ -102,4 +144,10 @@ def render_scatter(
     declaration["method"] = "forward_scatter"
     declaration["n_layers"] = n_layers
     declaration["max_radius_px"] = r_cap
-    return DoFResult(out, "forward_scatter", masks, camera, declaration)
+    layer_trace = None
+    if recorder is not None:
+        recorder.finalize(out)
+        layer_trace = recorder.layer_trace()
+    return DoFResult(
+        out, "forward_scatter", masks, camera, declaration, trace=layer_trace
+    )

@@ -20,6 +20,10 @@ class DoFMasks:
     unrecoverable: np.ndarray            # declared approximation range
     signed_coc_px: np.ndarray
     radius_px: np.ndarray
+    # Effective provenance of the sample feeding each pixel's CoC:
+    # 0 measured background, 1 measured foreground, 2 edge boundary,
+    # 3 unknown-fill (approximation), 4 unrecoverable (approximation).
+    provenance: np.ndarray
 
 
 @dataclass
@@ -29,6 +33,7 @@ class DoFResult:
     masks: DoFMasks
     camera: CameraParams
     declaration: dict                    # numeric summary of approximations
+    trace: object | None = None          # LayerTrace when tracing was requested
 
 
 def prepare_inputs(
@@ -86,6 +91,14 @@ def prepare_inputs(
     signed = camera.signed_coc_px(filled_depth)
     radius = np.abs(signed) * 0.5
 
+    # Provenance is tied to the *original* measurement so a filled pixel
+    # never masquerades as directly observed data.
+    provenance = np.zeros(clean_depth.shape, dtype=np.int8)
+    provenance[fg] = 1
+    provenance[edge] = 2
+    provenance[unknown] = 3
+    provenance[unrecoverable] = 4
+
     masks = DoFMasks(
         edge_contaminated=edge,
         foreground=fg,
@@ -94,6 +107,7 @@ def prepare_inputs(
         unrecoverable=unrecoverable,
         signed_coc_px=signed,
         radius_px=radius,
+        provenance=provenance,
     )
     declaration = {
         "edge_pixels": int(edge.sum()),

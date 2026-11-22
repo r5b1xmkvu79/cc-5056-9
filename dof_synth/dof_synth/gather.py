@@ -28,6 +28,7 @@ import numpy as np
 from .camera import CameraParams
 from .common import DoFResult, prepare_inputs
 from .kernels import convolve_disk, quantize_radii
+from .trace import TraceRecorder, TraceRequest
 
 
 def render_gather(
@@ -41,6 +42,9 @@ def render_gather(
     coc_limit_px: float = 1.0,
     depth_step_m: float = 0.15,
     edge_half_width_px: int = 1,
+    trace: TraceRequest | None = None,
+    layer_order: str = "depth",
+    layer_override: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> DoFResult:
     filled_color, filled_depth, masks, declaration = prepare_inputs(
         color,
@@ -56,7 +60,11 @@ def render_gather(
     radius = masks.radius_px
     r_cap = float(radius.max()) if max_radius_px is None else max_radius_px
     r_cap = max(r_cap, 1e-3)
-    layer_idx, layer_radius = quantize_radii(radius, n_layers, r_cap)
+    if layer_override is not None:
+        layer_idx, layer_radius = layer_override
+        n_layers = int(np.asarray(layer_radius).size)
+    else:
+        layer_idx, layer_radius = quantize_radii(radius, n_layers, r_cap)
 
     # Layer depth: representative depth for ordering = minimum member
     # depth, so front-to-back compositing is conservative.
@@ -70,7 +78,30 @@ def render_gather(
     acc_alpha = np.zeros((h, w), dtype=np.float64)
     fg_accum_alpha = np.zeros((h, w), dtype=np.float64)
 
-    for k in np.argsort(layer_min_depth):
+    if layer_order not in ("depth", "reverse"):
+        raise ValueError("layer_order must be 'depth' or 'reverse'")
+    visit = np.argsort(layer_min_depth)
+    if layer_order == "reverse":
+        # Diagnostic only: the reverse-gather compositor is also
+        # front-to-back, so visiting far-to-near is intentionally wrong
+        # and only used to measure order sensitivity.
+        visit = visit[::-1]
+
+    recorder = None
+    if trace is not None:
+        recorder = TraceRecorder(
+            trace,
+            provenance=masks.provenance,
+            signed_coc_px=masks.signed_coc_px,
+            depth_m=filled_depth,
+            layer_index=layer_idx,
+            layer_radius=layer_radius,
+            layer_min_depth=layer_min_depth,
+            method="reverse_gather",
+            n_layers=n_layers,
+        )
+
+    for order_rank, k in enumerate(visit):
         if not np.isfinite(layer_min_depth[k]):
             continue
         sel = layer_idx == k
@@ -78,6 +109,9 @@ def render_gather(
         coverage = sel.astype(np.float64)
         premult = np.zeros((h, w, 3), dtype=np.float64)
         premult[sel] = filled_color[sel]
+
+        if recorder is not None:
+            recorder.begin_layer(k, r, order_rank, sel)
 
         if r > 1e-3:
             coverage_b = np.clip(convolve_disk(coverage, r), 0.0, 1.0)
@@ -97,6 +131,11 @@ def render_gather(
             # premult_b already equals colour * disk coverage, so it is
             # composited directly without renormalising energy away.
             weight = 1.0 - fg_accum_alpha
+            if recorder is not None:
+                recorder.note(
+                    k, r, order_rank, coverage_b, weight, fg_accum_alpha,
+                    premult_b * weight[..., None],
+                )
             fg_accum_alpha += coverage_b * weight
             acc_color += premult_b * weight[..., None]
             acc_alpha += coverage_b * weight
@@ -104,6 +143,11 @@ def render_gather(
             # Background layers fill only what foreground coverage and
             # earlier background layers left transparent: no penetration.
             remaining = (1.0 - fg_accum_alpha) * (1.0 - acc_alpha)
+            if recorder is not None:
+                recorder.note(
+                    k, r, order_rank, coverage_b, remaining, acc_alpha,
+                    premult_b * remaining[..., None],
+                )
             acc_color += premult_b * remaining[..., None]
             acc_alpha += coverage_b * remaining
 
@@ -116,4 +160,10 @@ def render_gather(
     declaration["method"] = "reverse_gather"
     declaration["n_layers"] = n_layers
     declaration["max_radius_px"] = r_cap
-    return DoFResult(out, "reverse_gather", masks, camera, declaration)
+    layer_trace = None
+    if recorder is not None:
+        recorder.finalize(out)
+        layer_trace = recorder.layer_trace()
+    return DoFResult(
+        out, "reverse_gather", masks, camera, declaration, trace=layer_trace
+    )
