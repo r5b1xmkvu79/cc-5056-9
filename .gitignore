@@ -23,3 +23,8 @@ __pycache__/
 *.log
 .env
 .env.*
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/

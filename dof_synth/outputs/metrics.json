@@ -1,0 +1,42 @@
+{
+  "camera": {
+    "f_mm": 35.0,
+    "f_number": 1.4,
+    "focus_m": 2.75,
+    "pixel_pitch_mm": 0.140625,
+    "max_coc_radius_px": 3.355842029875179
+  },
+  "rmse_scatter_vs_reference": 0.07853777893586829,
+  "rmse_gather_vs_reference": 0.07507655409331332,
+  "rmse_scatter_vs_gather": 0.01565472768442932,
+  "rmse_naive_vs_reference": 0.0833281711561581,
+  "rmse_scatter_on_thin_foreground_footprint": 0.13181859102689364,
+  "rmse_gather_on_thin_foreground_footprint": 0.11783907951590815,
+  "rmse_naive_on_thin_foreground_footprint": 0.14988647430581412,
+  "point_light_energy_ratio_scatter": 0.9650517001853933,
+  "point_light_energy_ratio_gather": 0.9517159405018154,
+  "halo_energy_scatter": 511.8054054054054,
+  "halo_energy_gather": 466.81855368882395,
+  "halo_energy_reference": 446.8781249999995,
+  "halo_excess_scatter_vs_ref": 141.42437500000008,
+  "halo_excess_gather_vs_ref": 108.81663212198691,
+  "penetration_scatter_vs_ref": 0.08075818652910295,
+  "penetration_gather_vs_ref": 0.08190918895945999,
+  "penetration_naive_vs_ref": 0.05459821348177272,
+  "declaration": {
+    "edge_pixels": 2980,
+    "unknown_pixels": 482,
+    "unrecoverable_pixels": 0,
+    "unknown_fraction": 0.007354736328125,
+    "unrecoverable_fraction": 0.0,
+    "declaration_radius_px": 8.0,
+    "coc_limit_px": 1.0,
+    "method": "forward_scatter",
+    "n_layers": 64,
+    "max_radius_px": 3.355842029875179
+  },
+  "dof_bounds_m": [
+    1.9178482972136224,
+    4.857787013801756
+  ]
+}
